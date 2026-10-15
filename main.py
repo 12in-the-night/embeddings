@@ -19,6 +19,24 @@ import flax.linen as nn
 import optax
 from flax.training import train_state
 from flax.jax_utils import replicate, unreplicate
+import os
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+
+# ---------------------------------------------------------------- HF auth
+try:
+    from kaggle_secrets import UserSecretsClient
+    os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("hg")
+except Exception:
+    pass
+
+import sys, glob, math, time, queue, pickle, threading, functools
+import numpy as np
+import jax, jax.numpy as jnp
+import flax.linen as nn
+import optax
+from flax.training import train_state
+from flax.jax_utils import replicate, unreplicate
 
 # ---------------------------------------------------------------- config
 _e = lambda k, d: type(d)(os.environ.get(k, d))
@@ -100,13 +118,12 @@ print(f"vocab={VOCAB}  ctx={SEQ_LEN}  layers={N_LAYERS}  "
 # ---------------------------------------------------------------- data
 def _stream_text():
     from datasets import load_dataset
-    ds = load_dataset("HuggingFaceFW/fineweb", "sample-10BT",
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", "sample-350BT",
                       split="train", streaming=True)
     for ex in ds:
         t = ex["text"]
         if t:
             yield t
-
 def build_cache(cache_dir, tokens_goal):
     done = os.path.join(cache_dir, "DONE")
     if os.path.exists(done):
@@ -482,10 +499,10 @@ def make_state(rng, model, seq_len):
         warmup_steps=WARMUP, decay_steps=STEPS, end_value=LR * MIN_LR_FRAC)
     tx = optax.chain(
         optax.clip_by_global_norm(CLIP_NORM),
-        optax.adafactor(learning_rate=sched,
-                        weight_decay_rate=0.01,
-                        multiply_by_parameter_scale=False,
-                        weight_decay_mask=_wd_mask(params)),
+        optax.adafactor(learning_rate=None,
+                        multiply_by_parameter_scale=False),
+        optax.add_decayed_weights(-0.01, _wd_mask(params)),
+        optax.scale_by_learning_rate(sched, flip_sign=False),
     )
     return train_state.TrainState.create(apply_fn=model.apply,
                                          params=params, tx=tx)
