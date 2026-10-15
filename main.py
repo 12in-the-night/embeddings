@@ -1001,7 +1001,7 @@ def sanity():
                      optax.scale_by_learning_rate(sched))
     st = train_state.TrainState.create(
         apply_fn=None, params={"w": jnp.array(1.0)}, tx=tx)
-    g = jax.grad(lambda ps: (ps["w"] - 3.0) ** 2)(st.params)
+    g = jax.grad(lambda ps: ps["w"] ** 2)(st.params)
     st2 = st.apply_gradients(grads=g)
     assert float(st2.params["w"]) < 1.0, "optimizer must descend"
     print("[sanity] OK")
@@ -1170,13 +1170,28 @@ def _build_model(ckpt, capture=False):
 def _run_capture(model, params, seq_len, img_size, n_batches, bs):
     rng = np.random.default_rng(0)
     agg = {}
-    for _ in range(n_batches):
-        toks = jnp.asarray(rng.integers(0, model.vocab,
-                                         size=(bs, seq_len), dtype=np.int32))
-        msk  = jnp.ones_like(toks)
-        img  = jnp.zeros((bs, 3, img_size, img_size), dtype=jnp.float32)
-        # FIX: model was constructed with capture=True; do NOT pass capture
-        # as an apply kwarg (it is not a __call__ argument -> TypeError).
+    # Pull real text once, reuse across batches
+    try:
+        from datasets import load_dataset
+        ds = load_dataset("sentence-transformers/all-nli", "triplet",
+                          split="train", streaming=True).take(bs * n_batches)
+        texts = [ex["anchor"] for ex in ds]
+    except Exception as e:
+        print(f"[capture] real data unavailable ({e}), using random")
+        texts = None
+
+    for b in range(n_batches):
+        if texts:
+            chunk = texts[b*bs:(b+1)*bs]
+            ids_list = [encode_text(t) for t in chunk]
+            toks_np, msk_np = _pad(ids_list, seq_len)
+            toks = jnp.asarray(toks_np)
+            msk  = jnp.asarray(msk_np)
+        else:
+            toks = jnp.asarray(rng.integers(0, model.vocab,
+                                             size=(bs, seq_len), dtype=np.int32))
+            msk  = jnp.ones_like(toks)
+        img = jnp.zeros((bs, 3, img_size, img_size), dtype=jnp.float32)
         _, inter = model.apply(
             {"params": params}, toks, msk, img,
             mutable=["intermediates"])
@@ -1190,7 +1205,6 @@ def _run_capture(model, params, seq_len, img_size, n_batches, bs):
     for k in agg:
         agg[k] = agg[k] / n_batches
     return agg
-
 
 # ---------------- expert pruning ----------------
 def prune_experts(ckpt, keep_ratio, n_calib, bs):
@@ -1216,6 +1230,7 @@ def prune_experts(ckpt, keep_ratio, n_calib, bs):
 
     E_old = ckpt["config"]["moe"]["n_experts"]
     E_new = max(1, int(round(E_old * keep_ratio)))
+    print(f"[prune_experts] usage captured for {len(usage)} layers")
     print(f"[prune_experts] E {E_old} -> {E_new}")
 
     keep_masks = {}
@@ -1303,7 +1318,10 @@ def awq_calibrate(ckpt, n_batches, bs, alpha):
             weight_scales[base + "/up"] = s
         elif name == "moe_h_mag":        # hidden -> expert 'down' (E, F, C)
             weight_scales[base + "/down"] = s
+
     print(f"[awq] computed {len(weight_scales)} scales")
+    for k in list(weight_scales.keys())[:5]:
+        print(f"       {k}")
     return weight_scales
 
 
