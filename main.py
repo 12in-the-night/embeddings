@@ -120,6 +120,7 @@ def _stream_text():
     from datasets import load_dataset
     ds = load_dataset("HuggingFaceFW/fineweb-edu", "sample-350BT",
                       split="train", streaming=True)
+    ds = ds.shuffle(seed=42, buffer_size=10_000)
     for ex in ds:
         t = ex["text"]
         if t:
@@ -504,9 +505,9 @@ def make_state(rng, model, seq_len):
         optax.add_decayed_weights(-0.01, _wd_mask(params)),
         optax.scale_by_learning_rate(sched, flip_sign=False),
     )
+    tx = optax.MultiSteps(tx, every_k_schedule=8)
     return train_state.TrainState.create(apply_fn=model.apply,
                                          params=params, tx=tx)
-
 def _init_dyn_state(scale):
     return (jnp.float32(scale), jnp.int32(0), jnp.int32(0))
 
