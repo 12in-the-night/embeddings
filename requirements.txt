@@ -1,13 +1,12 @@
-# ------------------------------------------------------------
-# JAX backend — pick ONE (uncomment the line for your platform):
-#   jax[cuda12]  → NVIDIA GPU on Linux / WSL2
-#   jax[tpu]     → Google Cloud TPU (or Kaggle TPU)
-#   jax          → CPU (any platform, including native Windows)
-# ------------------------------------------------------------
-# jax[cuda12]
-jax[tpu]
-#jax
+# TPU-only dependencies.
+# Install:
+#   pip install -r requirements.txt
+#   pip install -U "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+#
+# The second line is required on Kaggle because the base image may
+# already have `jax` (CPU) installed — `jax[tpu]` alone won't upgrade it.
 
+jax[tpu]
 flax>=0.8
 optax>=0.2
 datasets>=2.18

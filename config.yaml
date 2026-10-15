@@ -1,27 +1,27 @@
 # ============================================================
-# Multimodal MoE Embedding Model — Configuration
+# TPU v3-8 config — Kaggle / GCP
+# ============================================================
+# Kaggle: Settings → Accelerator → TPU VM v3-8, Internet On.
+# GCP:    tpu-vm create ... --accelerator-type=v3-8
+#
+# Phase A: text trunk trains, ViT frozen.
+# Run:      python main.py
+# Resume:   python main.py --resume /path/to/ckpt.pkl
+# Compress: python main.py --action full
 # ============================================================
 
 # ---- Resume ----
-# Path to a checkpoint to resume from.
-# Used when `--resume` is not passed on the CLI.
-# Leave as null for fresh start.
 resume: null
-# Examples:
-#   resume: ./ckpts_pretrain/pretrain_final.pkl
-#   resume: ./ckpts_pretrain/ckpt_005000.pkl
 
 # ---- Phase ----
-# pretrain  : mixed image-text + triplet data (image branch active)
-# posttrain : text-only triplet data; image branch frozen (zero-grad)
 phase: pretrain
 data: mixed
 
 # ---- Training ----
 training:
-  seq_len: 128
-  batch: 128
-  steps: 50000
+  seq_len: 2048
+  batch: 32
+  steps: 15000
   lr: 3.0e-4
   warmup: 1000
   min_lr_frac: 0.1
@@ -30,29 +30,31 @@ training:
   eval_every: 2000
   eval_batch: 512
   ckpt_every: 1000
-  ckpt_dir: ./ckpts_pretrain
-  grad_accum: 1
+  ckpt_dir: /kaggle/working/ckpts_pretrain
+  grad_accum: 2
   remat: true
-  precision: fp16         # fp16 | bf16 | fp32
+  precision: bf16
+  freeze_text: false       # text trunk trains
+  freeze_image: True      # ViT frozen — no grads, no decay
 
 # ---- Model ----
 model:
-  d_model: 512
+  d_model: 896
   n_layers: 32
-  mrl_dims: [64, 128, 256, 512]
+  mrl_dims: [  64,512, 768]
   vocab_tok: mistralai/Mistral-7B-v0.1
 
 mamba2:
   d_state: 128
   d_conv: 4
-  chunk: 64
+  chunk: 128
   expand: 2
   head_dim: 64
 
 moe:
   n_experts: 32
   top_k: 2
-  expert_ffn_mult: 0.5
+  expert_ffn_mult: 0.715
   shared_ffn_mult: 1.0
   every: 2
   layers: null
@@ -65,18 +67,17 @@ qat:
   group_size: 128
 
 image:
-  size: 224
+  size: 64
   patch: 16
-  dim: 768
-  layers: 8
-  heads: 12
+  dim: 32
+  layers: 4
+  heads: 4
   mlp_mult: 4
   processor: google/vit-base-patch16-224
 
 # ---- Data mix ----
-# image_text requires HF_TOKEN (laion/laion400m is gated).
 data_mix:
-  image_text: 2
+  image_text: 0      # have hf token
   msmarco_triplet: 3
   allnli_triplet: 1
   bekko_triplet: 2
@@ -86,15 +87,13 @@ optim:
   init_temp: 50.0
 
 # ---- Postprocess ----
-# *_keep_ratio is the fraction KEPT, not pruned.
-#   expert_keep_ratio: 0.75 → keeps 24 of 32 experts (prunes 8).
 postprocess:
-  input_ckpt: ./ckpts_pretrain/pretrain_final.pkl
-  output_dir: ./ckpts_compressed
+  input_ckpt: /kaggle/working/ckpts_pretrain/pretrain_final.pkl
+  output_dir: /kaggle/working/ckpts_compressed
   expert_keep_ratio: 0.75
   layer_keep_ratio: 0.75
   awq_alpha: 0.5
   awq_calib_batches: 32
-  awq_calib_batch_size: 8
-  export_bits: 4          # 4 = packed int4, 8 = int8
+  awq_calib_batch_size: 16
+  export_bits: 4
   export_group_size: 128

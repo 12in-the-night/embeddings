@@ -108,7 +108,6 @@ INIT_TEMP = float(_get("optim.init_temp", 50.0))
 PP            = _get("postprocess", {})
 PP_INPUT      = PP.get("input_ckpt", "./ckpts_pretrain/pretrain_final.pkl")
 PP_OUTPUT_DIR = PP.get("output_dir", "./ckpts_compressed")
-# *_keep_ratio = fraction to KEEP (e.g. 0.75 keeps 75%).
 PP_E_KEEP     = float(PP.get("expert_keep_ratio", PP.get("prune_experts_ratio", 0.75)))
 PP_L_KEEP     = float(PP.get("layer_keep_ratio", PP.get("prune_layers_ratio", 0.75)))
 PP_AWQ_ALPHA  = float(PP.get("awq_alpha", 0.5))
@@ -116,6 +115,9 @@ PP_AWQ_BATCHES= int(PP.get("awq_calib_batches", 32))
 PP_AWQ_BS     = int(PP.get("awq_calib_batch_size", 8))
 PP_EXPORT_BITS= int(PP.get("export_bits", 4))
 PP_EXPORT_GRP = int(PP.get("export_group_size", 128))
+
+FREEZE_TEXT  = _get("training.freeze_text", False)
+FREEZE_IMAGE = _get("training.freeze_image", False)
 
 assert QAT_BITS in (4, 8), f"QAT_BITS must be 4 or 8, got {QAT_BITS}"
 assert PP_EXPORT_BITS in (4, 8), f"export_bits must be 4 or 8, got {PP_EXPORT_BITS}"
@@ -335,7 +337,7 @@ class Mamba2Block(nn.Module):
         z, xBC, dt = jnp.split(zxbcdt,
                                [d_inner, 2 * d_inner + 2 * N], axis=-1)
 
-        # FIX: flax.linen.Conv has no "CAUSAL" padding — left-pad manually.
+        # Manual causal pad — Flax nn.Conv has no "CAUSAL" padding.
         xBC = jnp.pad(xBC, [(0, 0), (self.d_conv - 1, 0), (0, 0)])
         xBC = nn.Conv(features=xBC.shape[-1], kernel_size=(self.d_conv,),
                       padding="VALID",
@@ -591,6 +593,8 @@ class MMEmbedModel(nn.Module):
         scores = jnp.where(mask[:, :, None] > 0, scores, -1e9)
         attn = jax.nn.softmax(scores.astype(jnp.float32), axis=1)
         pooled_text = jnp.einsum("btd,bto->bod", x, attn)[:, 0]
+        if FREEZE_TEXT:
+            pooled_text = jax.lax.stop_gradient(pooled_text)
 
         pooled_img = None
         if pixel_values is not None:
@@ -603,6 +607,8 @@ class MMEmbedModel(nn.Module):
             pooled_img = QDense(self.d_model, use_bias=True)(pooled_img)
             pooled_img = nn.LayerNorm(dtype=jnp.float32)(
                 pooled_img.astype(jnp.float32)).astype(self.dtype)
+            if FREEZE_IMAGE:
+                pooled_img = jax.lax.stop_gradient(pooled_img)
 
         log_temp = self.param("log_temp",
                               lambda k, s: jnp.full(s, math.log(INIT_TEMP)),
@@ -804,19 +810,18 @@ def load_eval_batch(n_samples, max_len):
 # TRAINING
 # ================================================================
 def _wd_mask(params, phase=None):
-    phase = phase or PHASE
     def _keep(path, leaf):
         keys = [str(getattr(k, "key", k)) for k in path]
-        # In posttrain the image branch is never used (triplet batches only),
-        # so ViT params receive zero grads; excluding them from decay too
-        # makes "frozen" exact (zero-grad + zero-decay = no change).
-        if phase == "posttrain" and any("ViT" in k for k in keys):
+        is_vit = any("ViT" in k for k in keys)
+        if FREEZE_IMAGE and is_vit:
+            return False
+        if FREEZE_TEXT and not is_vit:
             return False
         if any("LayerNorm" in k for k in keys):
             return False
         return keys[-1] not in ("bias", "scale", "A_log", "D",
                                 "dt_bias", "embedding", "q_pool",
-                                "log_temp", "cls", "pos", "router")
+                                "log_temp", "router")
     return jax.tree_util.tree_map_with_path(_keep, params)
 
 
@@ -829,7 +834,6 @@ def make_state(rng, model, seq_len, img_size):
         init_value=0.0, peak_value=LR,
         warmup_steps=WARMUP, decay_steps=STEPS,
         end_value=LR * MIN_LR_FRAC)
-    # FIX: standard descent — positive decay, negative LR via flip_sign.
     tx = optax.chain(
         optax.clip_by_global_norm(CLIP_NORM),
         optax.adafactor(learning_rate=None,
@@ -977,7 +981,8 @@ def evaluate(state, eval_batch, dim, n_dev):
 # SANITY
 # ================================================================
 def sanity():
-    print(f"[sanity] phase={PHASE} prec={PRECISION} E={N_EXPERTS} k={TOP_K}")
+    print(f"[sanity] phase={PHASE} prec={PRECISION} E={N_EXPERTS} k={TOP_K} "
+          f"freeze_text={FREEZE_TEXT} freeze_image={FREEZE_IMAGE}")
     x = jnp.array([0.1, 0.7, -1.3, 2.4, 0.0, -0.05], dtype=jnp.float32)
     g = jax.grad(lambda v: fake_quant(v).sum())(x)
     assert jnp.allclose(g, 1.0), "STE gradient wrong"
@@ -1302,8 +1307,6 @@ def awq_calibrate(ckpt, n_batches, bs, alpha):
     img_size = ckpt["config"]["image"]["size"]
     agg = _run_capture(model, params, seq_len, img_size, n_batches, bs)
 
-    # Map each captured activation magnitude to the weight tensor it
-    # should scale (exact path matching — no substring heuristics).
     weight_scales = {}
     for key, val in agg.items():
         parts = key.split("/")
@@ -1312,11 +1315,11 @@ def awq_calibrate(ckpt, n_batches, bs, alpha):
         mag = np.maximum(np.asarray(val, dtype=np.float32), 1e-6)
         s = mag ** alpha
         s = s / s.mean()
-        if name == "act_mag":            # QDense input -> its kernel (in, out)
+        if name == "act_mag":
             weight_scales[base + "/kernel"] = s
-        elif name == "moe_in_mag":       # MoE input -> expert 'up' (E, C, F)
+        elif name == "moe_in_mag":
             weight_scales[base + "/up"] = s
-        elif name == "moe_h_mag":        # hidden -> expert 'down' (E, F, C)
+        elif name == "moe_h_mag":
             weight_scales[base + "/down"] = s
 
     print(f"[awq] computed {len(weight_scales)} scales")
@@ -1333,10 +1336,10 @@ def awq_apply(ckpt, weight_scales):
         if name in ("kernel", "up", "down") and path_str in weight_scales:
             arr = jnp.asarray(leaf)
             s = jnp.asarray(weight_scales[path_str])
-            if name == "kernel":            # (in, out) — scale input dim
+            if name == "kernel":
                 if arr.shape[0] == s.shape[0]:
                     return arr * s[:, None]
-            else:                           # experts (E, in, out) — scale in
+            else:
                 if arr.shape[1] == s.shape[0]:
                     return arr * s[None, :, None]
         return leaf
@@ -1478,7 +1481,6 @@ def main():
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
 
-    # config.yaml `resume:` is used when --resume is not given
     resume = args.resume or CFG_RESUME
 
     if args.action == "train":
