@@ -1,6 +1,6 @@
 """
 GPU-only. Pure Mamba-2 + MoE (E=8, top-2) + INT8 QAT.
-d_model=768, 24 layers, S=2048, Mistral 32k vocab, tied embeddings.
+d_model=768, 24 layers, S=1024, Mistral 32k vocab, tied embeddings.
 Target: 2x T4 (16 GB each), fp16, dynamic loss scale, Adafactor, remat.
 
 Run:    python train.py
@@ -22,8 +22,8 @@ from flax.jax_utils import replicate, unreplicate
 
 # ---------------------------------------------------------------- config
 _e = lambda k, d: type(d)(os.environ.get(k, d))
-SEQ_LEN       = _e("GPT_SEQ_LEN", 2048)
-GLOBAL_BATCH  = _e("GPT_BATCH", 2)
+SEQ_LEN       = _e("GPT_SEQ_LEN", 1024)
+GLOBAL_BATCH  = _e("GPT_BATCH", 4)
 STEPS         = _e("GPT_STEPS", 40000)
 LR            = _e("GPT_LR", 3e-4)
 WARMUP        = min(1000, max(STEPS // 20, 1))
@@ -32,7 +32,7 @@ CACHE_DIR     = os.environ.get("GPT_CACHE", "./gpt_cache")
 CKPT_DIR      = os.environ.get("GPT_CKPT", "./ckpts")
 TOKENS_GOAL   = _e("GPT_TOKENS_GOAL", 200_000_000)
 PREFETCH      = 4
-CKPT_EVERY    = _e("GPT_CKPT_EVERY", 500)
+CKPT_EVERY    = _e("GPT_CKPT_EVERY", 1000)
 LOG_EVERY     = _e("GPT_LOG_EVERY", 50)
 
 D_MODEL    = _e("GPT_D_MODEL", 768)
@@ -400,8 +400,8 @@ class Mamba2Block(nn.Module):
         dt_bias = self.param("dt_bias", _dt_bias_init, (H,))
 
         y = ssd_forward(x=x_in, dt=dt, A=A, B_mat=B_exp, C_mat=C_exp,
-                chunk_size=self.chunk, D=D, dt_bias=dt_bias,
-                dt_min=0.0, dt_max=100.0)
+                        chunk_size=self.chunk, D=D, dt_bias=dt_bias,
+                        dt_min=0.0, dt_max=100.0)
         y = y.reshape(B, T, d_inner)
         y = y * nn.silu(z)
         return QDense(C, use_bias=False)(y)
@@ -533,8 +533,6 @@ def train_step(state, batch, dyn_state):
     grads = jax.tree_util.tree_map(lambda g: g / scale, grads)
     new_state = state.apply_gradients(grads=grads)
 
-    # Skip update on inf: keep params, opt_state, step from `state`.
-    # has_inf identical on all devices (grads pmean'd before check).
     state = jax.tree_util.tree_map(
         lambda n, o: jnp.where(has_inf, o, n), new_state, state)
 
@@ -573,6 +571,7 @@ def save_checkpoint(state, step, path, dyn_state=None):
         pickle.dump(payload, f, protocol=4)
     os.replace(tmp, path)
     print(f"[ckpt] saved {path}  ({os.path.getsize(path)/1e6:.1f} MB)")
+    return path
 
 def load_checkpoint(path):
     with open(path, "rb") as f:
@@ -599,11 +598,11 @@ def sanity():
     C_r  = jax.random.normal(ks[4], (Bsz, L, H, N))
     D_r  = jax.random.normal(ks[5], (H,))
     b_r  = jax.random.normal(ks[6], (H,))
-    y_fast = ssd_forward(x_r, dt_r, A_r, B_r, C_r, chunk, D_r, b_r, 1e-3, 0.1)
-    y_ref  = ssd_naive  (x_r, dt_r, A_r, B_r, C_r, D_r, b_r, 1e-3, 0.1)
+    y_fast = ssd_forward(x_r, dt_r, A_r, B_r, C_r, chunk, D_r, b_r, 0.0, 100.0)
+    y_ref  = ssd_naive  (x_r, dt_r, A_r, B_r, C_r, D_r, b_r, 0.0, 100.0)
     err = float(jnp.max(jnp.abs(y_fast - y_ref)))
-    print(f"[sanity] ssd max|Δ| = {err:.3e}")
-    assert err < 1e-4, f"SSD mismatch vs reference: {err:.3e}"
+    print(f"[sanity] ssd wide-dt max|Δ| = {err:.3e}")
+    assert err < 1e-4, f"SSD mismatch: {err:.3e}"
 
     m = Mamba2Block(d_model=64, d_state=16, chunk=32, head_dim=16)
     dummy = jnp.zeros((2, 128, 64), dtype=jnp.float32)
@@ -674,7 +673,7 @@ def main():
                      daemon=True).start()
 
     t0 = time.time()
-    inf_acc = jnp.zeros((N_DEV,), jnp.float32)      # on-device accumulator
+    inf_acc = jnp.zeros((N_DEV,), jnp.float32)
     inf_at_last_log = 0
 
     for local_step in range(STEPS - start_step):
@@ -686,7 +685,7 @@ def main():
             N_DEV, PER_DEV_BATCH, SEQ_LEN + 1)
         state, dyn_state, nll, aux, has_inf = train_step(state, batch, dyn_state)
 
-        inf_acc = inf_acc + has_inf                  # no host sync
+        inf_acc = inf_acc + has_inf
 
         if step % LOG_EVERY == 0 or step == STEPS - 1:
             dt = time.time() - t0
@@ -694,7 +693,7 @@ def main():
             nll_f = float(unreplicate(nll).mean())
             aux_f = float(unreplicate(aux).mean())
             sc = float(unreplicate(dyn_state[0]))
-            inf_events = int(inf_acc[0])             # single sync
+            inf_events = int(inf_acc[0])
             since = inf_events - inf_at_last_log
             inf_at_last_log = inf_events
             print(f"step {step:6d} | nll {nll_f:.4f} "
