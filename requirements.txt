@@ -1,0 +1,19 @@
+# ------------------------------------------------------------
+# JAX backend - pick ONE (uncomment / move to your platform):
+#   jax[cuda12]  -> NVIDIA GPU on Linux or WSL2
+#   jax[tpu]     -> Google Cloud TPU
+# Note: native Windows only has the CPU backend; for GPU on
+# Windows use WSL2. On CPU, plain `jax` is enough.
+# ------------------------------------------------------------
+jax[cuda12]
+# jax[tpu]
+flax>=0.8
+optax>=0.2
+datasets>=2.18
+transformers>=4.40
+huggingface_hub>=0.23
+pyarrow>=14
+pyyaml>=6
+Pillow>=10
+tiktoken
+numpy>=1.24
