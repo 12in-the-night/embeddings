@@ -1,10 +1,11 @@
 # ============================================================
-# Multimodal MoE Embedding Model - Full Configuration
+# Multimodal MoE Embedding Model — Configuration
 # ============================================================
 
 # ---- Resume ----
-# Path to a checkpoint to resume from (used when --resume is not given).
-# Leave as null for a fresh start.
+# Path to a checkpoint to resume from.
+# Used when `--resume` is not passed on the CLI.
+# Leave as null for fresh start.
 resume: null
 # Examples:
 #   resume: ./ckpts_pretrain/pretrain_final.pkl
@@ -24,7 +25,7 @@ training:
   lr: 3.0e-4
   warmup: 1000
   min_lr_frac: 0.1
-  weight_decay: 0.01      # positive = actual decay (L2 shrinkage)
+  weight_decay: 0.01
   log_every: 50
   eval_every: 2000
   eval_batch: 512
@@ -53,8 +54,8 @@ moe:
   top_k: 2
   expert_ffn_mult: 0.5
   shared_ffn_mult: 1.0
-  every: 2                # every Nth layer gets MoE (last of each group)
-  layers: null            # or explicit list, e.g. [1, 3, 5, 7]; null = use every
+  every: 2
+  layers: null
   aux_lb_coef: 0.01
   aux_z_coef: 1.0e-3
 
@@ -72,9 +73,10 @@ image:
   mlp_mult: 4
   processor: google/vit-base-patch16-224
 
-# Batch-source sampling weights. In posttrain phase image_text is forced to 0.
+# ---- Data mix ----
+# image_text requires HF_TOKEN (laion/laion400m is gated).
 data_mix:
-  image_text: 2         # requires HF_TOKEN for laion/laion400m
+  image_text: 2
   msmarco_triplet: 3
   allnli_triplet: 1
   bekko_triplet: 2
@@ -84,8 +86,8 @@ optim:
   init_temp: 50.0
 
 # ---- Postprocess ----
-# NOTE: *_keep_ratio is the fraction KEPT, not pruned:
-#   expert_keep_ratio: 0.75  -> keeps 24 of 32 experts (prunes 8).
+# *_keep_ratio is the fraction KEPT, not pruned.
+#   expert_keep_ratio: 0.75 → keeps 24 of 32 experts (prunes 8).
 postprocess:
   input_ckpt: ./ckpts_pretrain/pretrain_final.pkl
   output_dir: ./ckpts_compressed
@@ -94,5 +96,5 @@ postprocess:
   awq_alpha: 0.5
   awq_calib_batches: 32
   awq_calib_batch_size: 8
-  export_bits: 4        # 4 = packed int4, 8 = int8
+  export_bits: 4          # 4 = packed int4, 8 = int8
   export_group_size: 128

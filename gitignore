@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+venv/
+env/
+.venv/
+
+# training artifacts
+ckpts*/
+ckpts_*/
+*.pkl
+*.tmp
+train.log
+pipeline.log
+
+# config overrides (keep config.yaml, ignore overrides)
+config_smoke.yaml
+config_local.yaml
+config_*.yaml
+!config.yaml
+
+# OS
+.DS_Store
+Thumbs.db

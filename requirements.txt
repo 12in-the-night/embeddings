@@ -1,12 +1,13 @@
 # ------------------------------------------------------------
-# JAX backend - pick ONE (uncomment / move to your platform):
-#   jax[cuda12]  -> NVIDIA GPU on Linux or WSL2
-#   jax[tpu]     -> Google Cloud TPU
-# Note: native Windows only has the CPU backend; for GPU on
-# Windows use WSL2. On CPU, plain `jax` is enough.
+# JAX backend — pick ONE (uncomment the line for your platform):
+#   jax[cuda12]  → NVIDIA GPU on Linux / WSL2
+#   jax[tpu]     → Google Cloud TPU (or Kaggle TPU)
+#   jax          → CPU (any platform, including native Windows)
 # ------------------------------------------------------------
-jax[cuda12]
-# jax[tpu]
+# jax[cuda12]
+jax[tpu]
+#jax
+
 flax>=0.8
 optax>=0.2
 datasets>=2.18
